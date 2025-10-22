@@ -19,6 +19,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+sys.path.append("/host_home/primary_synced/sglang/python/sglang/srt/debug_utils")
+from dumper import dumper
+
 from typing import Callable, Optional, Union
 
 import torch
@@ -162,6 +166,7 @@ class Qwen3Attention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+        self.layer_id = layer_idx
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
@@ -197,9 +202,19 @@ class Qwen3Attention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        # NOTE MODIFIED
+        # query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        # key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        q_before_norm = self.q_proj(hidden_states).view(hidden_shape)
+        k_before_norm = self.k_proj(hidden_states).view(hidden_shape)
+        dumper.dump("attn__q_before_norm", q_before_norm, layer_id=self.layer_id)
+        dumper.dump("attn__k_before_norm", k_before_norm, layer_id=self.layer_id)
+        query_states = self.q_norm(q_before_norm).transpose(1, 2)
+        key_states = self.k_norm(k_before_norm).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        dumper.dump("attn__q_before_rope", query_states, layer_id=self.layer_id)
+        dumper.dump("attn__k_before_rope", key_states, layer_id=self.layer_id)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -213,6 +228,10 @@ class Qwen3Attention(nn.Module):
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
+        dumper.dump("attn__q", query_states, layer_id=self.layer_id)
+        dumper.dump("attn__k", key_states, layer_id=self.layer_id)
+        dumper.dump("attn__v", value_states, layer_id=self.layer_id)
+
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -225,6 +244,8 @@ class Qwen3Attention(nn.Module):
             **kwargs,
         )
 
+        dumper.dump("attn__attn_output", attn_output, layer_id=self.layer_id)
+
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
@@ -233,6 +254,7 @@ class Qwen3Attention(nn.Module):
 class Qwen3DecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Qwen3Config, layer_idx: int):
         super().__init__()
+        self.layer_id = layer_idx
         self.hidden_size = config.hidden_size
 
         self.self_attn = Qwen3Attention(config=config, layer_idx=layer_idx)
@@ -254,8 +276,12 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
+        dumper.dump("layer_start__hidden_states_and_residual", hidden_states, layer_id=self.layer_id)
+
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        dumper.dump("layer_after_input_ln_hidden_states", hidden_states, layer_id=self.layer_id)
+
         # Self Attention
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
@@ -477,6 +503,10 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+        dumper.on_forward_pass_start()
+        dumper.dump("causallm__input_ids", input_ids)
+        dumper.dump("causallm__positions", position_ids)
+
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
