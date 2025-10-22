@@ -61,11 +61,16 @@ class Qwen3RMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        dumper.dump("rmsnorm__input", hidden_states)
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        dumper.dump("rmsnorm__after_mul_rsqrt", hidden_states)
+        dumper.dump("rmsnorm__weight", self.weight)
+        ans = self.weight * hidden_states.to(input_dtype)
+        dumper.dump("rmsnorm__ans", ans)
+        return ans
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -207,14 +212,17 @@ class Qwen3Attention(nn.Module):
         # key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         q_before_norm = self.q_proj(hidden_states).view(hidden_shape)
         k_before_norm = self.k_proj(hidden_states).view(hidden_shape)
-        dumper.dump("attn__q_before_norm", q_before_norm, layer_id=self.layer_id)
-        dumper.dump("attn__k_before_norm", k_before_norm, layer_id=self.layer_id)
+        dumper.dump("attn__q_before_norm", q_before_norm)
+        dumper.dump("attn__k_before_norm", k_before_norm)
+        dumper.set_ctx(norm_mode="q")
         query_states = self.q_norm(q_before_norm).transpose(1, 2)
+        dumper.set_ctx(norm_mode="k")
         key_states = self.k_norm(k_before_norm).transpose(1, 2)
+        dumper.set_ctx(norm_mode=None)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        dumper.dump("attn__q_before_rope", query_states, layer_id=self.layer_id)
-        dumper.dump("attn__k_before_rope", key_states, layer_id=self.layer_id)
+        dumper.dump("attn__q_before_rope", query_states)
+        dumper.dump("attn__k_before_rope", key_states)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -228,9 +236,9 @@ class Qwen3Attention(nn.Module):
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
-        dumper.dump("attn__q", query_states, layer_id=self.layer_id)
-        dumper.dump("attn__k", key_states, layer_id=self.layer_id)
-        dumper.dump("attn__v", value_states, layer_id=self.layer_id)
+        dumper.dump("attn__q", query_states)
+        dumper.dump("attn__k", key_states)
+        dumper.dump("attn__v", value_states)
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -244,7 +252,7 @@ class Qwen3Attention(nn.Module):
             **kwargs,
         )
 
-        dumper.dump("attn__attn_output", attn_output, layer_id=self.layer_id)
+        dumper.dump("attn__attn_output", attn_output)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -276,11 +284,13 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
-        dumper.dump("layer_start__hidden_states_and_residual", hidden_states, layer_id=self.layer_id)
+        dumper.override_enable(self.layer_id <= 3)
+        dumper.set_ctx(layer_id=self.layer_id)
+        dumper.dump("layer_start__hidden_states_and_residual", hidden_states)
 
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        dumper.dump("layer_after_input_ln_hidden_states", hidden_states, layer_id=self.layer_id)
+        dumper.dump("layer_after_input_ln_hidden_states", hidden_states)
 
         # Self Attention
         hidden_states, _ = self.self_attn(
@@ -300,6 +310,8 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+        dumper.override_enable(None)
+        dumper.set_ctx(layer_id=None)
         return hidden_states
 
 
