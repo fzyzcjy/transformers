@@ -22,6 +22,7 @@
 import sys
 sys.path.append("/host_home/primary_synced/sglang/python/sglang/srt/debug_utils")
 from dumper import dumper
+from sglang.srt.debug_utils.dumper import get_tensor_info
 
 from typing import Callable, Optional, Union
 
@@ -61,15 +62,15 @@ class Qwen3RMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        dumper.dump("rmsnorm__input", hidden_states)
+        dumper.dump("rmsnorm__input_hidden", hidden_states)
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        dumper.dump("rmsnorm__after_mul_rsqrt", hidden_states)
+        dumper.dump("rmsnorm__after_mul_rsqrt_hidden", hidden_states)
         dumper.dump("rmsnorm__weight", self.weight)
         ans = self.weight * hidden_states.to(input_dtype)
-        dumper.dump("rmsnorm__ans", ans)
+        dumper.dump("rmsnorm__ans_hidden", ans)
         return ans
 
     def extra_repr(self):
@@ -88,7 +89,20 @@ class Qwen3MLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        print(f"{get_tensor_info(self.gate_proj.weight)=}")
+        print(f"{get_tensor_info(self.down_proj.weight)=}")
+
+        # NOTE expanded
+        # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        dumper.dump("mlp__input_hidden_states", x)
+        gate = self.gate_proj(x)
+        up = self.up_proj(x)
+        dumper.dump("mlp__gate_hidden_states", gate)
+        dumper.dump("mlp__up_hidden_states", up)
+        x = self.act_fn(gate) * up
+        dumper.dump("mlp__after_act_hidden_states", x)
+        down_proj = self.down_proj(x)
+        dumper.dump("mlp__output_hidden_states", down_proj)
         return down_proj
 
 
@@ -303,13 +317,21 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
             position_embeddings=position_embeddings,
             **kwargs,
         )
+        dumper.dump("layer_after_attn_hidden_states", hidden_states)
+        dumper.dump("layer_after_attn_residual", residual)
         hidden_states = residual + hidden_states
+        dumper.dump("layer_after_attn_hidden_states_and_residual", hidden_states)
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        dumper.dump("layer_before_mlp_hidden_states", hidden_states)
         hidden_states = self.mlp(hidden_states)
+        dumper.dump("layer_after_mlp_hidden_states", hidden_states)
+        dumper.dump("layer_after_mlp_residual", residual)
         hidden_states = residual + hidden_states
+        dumper.dump("layer_end__hidden_states_and_residual", hidden_states)
+
         dumper.override_enable(None)
         dumper.set_ctx(layer_id=None)
         return hidden_states
