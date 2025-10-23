@@ -89,9 +89,6 @@ class Qwen3MLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        print(f"{get_tensor_info(self.gate_proj.weight)=}")
-        print(f"{get_tensor_info(self.down_proj.weight)=}")
-
         # NOTE expanded
         # down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         dumper.dump("mlp__input_hidden_states", x)
@@ -133,10 +130,16 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
+    dumper.dump("rope__input_q", q)
+    dumper.dump("rope__input_k", k)
+    dumper.dump("rope__cos", cos)
+    dumper.dump("rope__sin", sin)
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
+    dumper.dump("rope__output_q", q_embed)
+    dumper.dump("rope__output_k", k_embed)
     return q_embed, k_embed
 
 
@@ -298,7 +301,7 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
-        dumper.override_enable(self.layer_id <= 3)
+        # dumper.override_enable(self.layer_id <= 3)
         dumper.set_ctx(layer_id=self.layer_id)
         dumper.dump("layer_start__hidden_states_and_residual", hidden_states)
 
@@ -372,23 +375,33 @@ class Qwen3RotaryEmbedding(nn.Module):
         self.config = config
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
+        print(f"Qwen3RotaryEmbedding.init {self.rope_type=}")
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        dumper.dump("create_rope__inv_freq_at_constructor", inv_freq)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
     @torch.no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
+        dumper.dump("create_rope__position_ids", position_ids)
+        dumper.dump("create_rope__inv_freq", self.inv_freq)
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
+        dumper.dump("create_rope__inv_freq_expanded", inv_freq_expanded)
         position_ids_expanded = position_ids[:, None, :].float()
 
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        dumper.dump("create_rope__device_type", device_type)
         with torch.autocast(device_type=device_type, enabled=False):  # Force float32
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            dumper.dump("create_rope__freqs", freqs)
             emb = torch.cat((freqs, freqs), dim=-1)
+            dumper.dump("create_rope__emb", emb)
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
 
+        dumper.dump("create_rope__output_cos", cos)
+        dumper.dump("create_rope__output_sin", sin)
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
@@ -478,6 +491,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 **kwargs,
             )
 
+        dumper.dump("model_last_hidden_states_and_residual_before_norm", hidden_states)
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -553,9 +567,13 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
+        dumper.dump("causallm__last_hidden_states", hidden_states)
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
+        dumper.dump("causallm__slice_indices", slice_indices)
+        dumper.dump("causallm__lm_head_weights", self.lm_head.weight)
+        dumper.dump("causallm__logits", logits)
 
         loss = None
         if labels is not None:
