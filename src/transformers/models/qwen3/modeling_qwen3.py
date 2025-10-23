@@ -221,6 +221,7 @@ class Qwen3Attention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        dumper.dump("attn__input_hidden_states", hidden_states)
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -306,7 +307,9 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         dumper.dump("layer_start__hidden_states_and_residual", hidden_states)
 
         residual = hidden_states
+        dumper.set_ctx(norm_mode="input_ln")
         hidden_states = self.input_layernorm(hidden_states)
+        dumper.set_ctx(norm_mode=None)
         dumper.dump("layer_after_input_ln_hidden_states", hidden_states)
 
         # Self Attention
@@ -327,7 +330,9 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
 
         # Fully Connected
         residual = hidden_states
+        dumper.set_ctx(norm_mode="post_attn_ln")
         hidden_states = self.post_attention_layernorm(hidden_states)
+        dumper.set_ctx(norm_mode=None)
         dumper.dump("layer_before_mlp_hidden_states", hidden_states)
         hidden_states = self.mlp(hidden_states)
         dumper.dump("layer_after_mlp_hidden_states", hidden_states)
